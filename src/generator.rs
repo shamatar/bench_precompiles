@@ -5,7 +5,7 @@ pub const MGAS_PER_SECOND: u128 = 30_000_000;
 use rand::{SeedableRng};
 use rand_xorshift::XorShiftRng;
 
-pub fn generate_sha256_vectors(num_different_vectors: usize, num_tries_per_vector: usize) -> Vec<( Vec<(Vec<u8>, [u8; 32])>, u128, u64)> {    
+pub fn generate_sha256_vectors(num_different_vectors: usize, num_tries_per_vector: usize) -> Vec<(u64, Vec<(Vec<u8>, [u8; 32])>, u128, u64)> {    
     let limit = 256;
     let step = 8;
 
@@ -21,11 +21,14 @@ pub fn generate_sha256_vectors(num_different_vectors: usize, num_tries_per_vecto
 
             let input_clone = input.clone();
             let runnable = move || {
-                runners::run_sha256(&input_clone);
-                Ok(())
+                runners::run_sha256(&input_clone)
             };
 
-            let total_time = measurements::measure(&runnable, num_tries_per_vector);
+            let checker = move |r: [u8; 32]| {
+                r == output
+            };
+
+            let total_time = measurements::measure_with_validity(&runnable, &checker, num_tries_per_vector);
             total += total_time;
             inputs_and_outputs.push((input, output));
         }
@@ -35,67 +38,190 @@ pub fn generate_sha256_vectors(num_different_vectors: usize, num_tries_per_vecto
 
         let gas = gas as u64;
 
-        data_points.push((inputs_and_outputs, average_ns, gas));
+        data_points.push((len as u64, inputs_and_outputs, average_ns, gas));
     }
 
     data_points
+}
+
+
+pub fn generate_bn_add_vectors(num_different_vectors: usize, num_tries_per_vector: usize) -> Vec<(u64, Vec<([u8;128], [u8; 64])>, u128, u64)> {    
+    let mut rng = XorShiftRng::from_seed([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+
+    let mut data_points = vec![];
+
+    let mut total = 0u128;
+    let mut inputs_and_outputs = vec![];
+    for _ in 0..num_different_vectors {
+        let (input, output) = input_generators::generate_bnadd_vector(&mut rng);
+
+        let input_clone = input.clone();
+        let runnable = move || {
+            runners::run_bn_add(&input_clone)
+        };
+
+        let checker = move |r: [u8; 64]| {
+            assert!(&r[..] != &[0u8; 64][..]);
+            &r[..] == &output[..]
+        };
+
+        let total_time = measurements::measure_with_validity(&runnable, &checker, num_tries_per_vector);
+        total += total_time;
+        inputs_and_outputs.push((input, output));
+    }
+
+    let average_ns = total / (num_different_vectors as u128) / (num_tries_per_vector as u128);
+    let gas = average_ns * MGAS_PER_SECOND / 1_000_000_000;
+
+    let gas = gas as u64;
+
+    data_points.push((0u64, inputs_and_outputs, average_ns, gas));
+
+    data_points
+}
+
+
+pub fn perform_measurements<
+    T, 
+    F: Fn() -> Vec<(u64, Vec<T>, u128, u64)>, 
+    C: Fn(T) -> (Vec<u8>, Vec<u8>),
+    A: Fn(u64) -> String
+>(
+    should_write: bool,
+    current_pricer: crate::pricers::Pricer,
+    proposed_pricer: crate::pricers::Pricer,
+    runner: F,
+    transformer: C,
+    base_path: &str,
+    ann: A
+) {
+    let data = runner();
+    for (scalar_param, ins_and_outs, _, gas) in data.into_iter() {
+        let data_as_vector: Vec<_> = ins_and_outs.into_iter().map(|el| transformer(el)).collect();
+        let current_gas = current_pricer.price(scalar_param);
+        let proposed_gas = proposed_pricer.price(scalar_param);
+        if should_write {
+            for (p, g) in vec!["current", "proposed"].into_iter().zip(vec![current_gas, proposed_gas].into_iter()) {
+                let file = std::fs::File::create(&format!("{}/{}/input_param_scalar_{}_gas_{}", base_path, p, scalar_param, g)).unwrap();
+                let mut writer = csv::Writer::from_writer(file);
+                for (input, output) in data_as_vector.clone().into_iter() {
+                    writer.write_record(&[
+                        hex::encode(&input),
+                        hex::encode(&output)
+                    ]).unwrap();
+                }
+            }
+        }
+
+        let annotation = ann(scalar_param);
+
+        println!("{}", annotation);
+        print_gases(gas, current_gas, proposed_gas);
+    }
+}
+
+fn make_colored_bool(input: bool) -> colored::ColoredString {
+    use colored::*;
+
+    if input {
+        format!("{}", input).green()
+    } else {
+        format!("{}", input).red()
+    }
+}
+
+fn print_gases(real: u64, current_schedule: u64, proposed_schedule: u64) {
+    use colored::*;
+
+    println!("Fits into pre-2666 schedule: {}, runtime: {}, schedule: {}", 
+        make_colored_bool(real <= current_schedule), 
+        format!("{}", real).yellow(),
+        format!("{}", current_schedule).yellow()
+    );
+    println!("Fits into post-2666 schedule: {}, runtime: {}, schedule: {}", 
+        make_colored_bool(real <= proposed_schedule), 
+        format!("{}", real).yellow(),
+        format!("{}", proposed_schedule).yellow()
+    );
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
 
-    #[test]
-    fn generate_for_sha256_current_pricing() {
-        let base_path = "./vectors/sha256/current";
-        let data = generate_sha256_vectors(10, 10000);
-        for (ins_and_outs, _, _) in data.into_iter() {
-            let input_len = ins_and_outs[0].0.len();
-            let pricer = crate::pricers::current_sha256_pricer();
-            let gas = pricer.price(input_len as u64);
-            let file = std::fs::File::create(&format!("{}/input_len_{}_gas_{}", base_path, input_len, gas)).unwrap();
-            let mut writer = csv::Writer::from_writer(file);
-            for (input, output) in ins_and_outs.into_iter() {
-                writer.write_record(&[
-                    hex::encode(&input),
-                    hex::encode(&output)
-                ]).unwrap();
-            }
-        }
+    fn do_sha256(write: bool) {
+        let base_path = "./vectors/sha256";
+
+        let data_fn = || {
+            generate_sha256_vectors(10, 10000)
+        };
+
+        let transformer_fn = |a: (Vec<u8>, [u8; 32])| {
+            let (a, b) = a;
+
+            (a, b.to_vec())
+        };
+
+        let ann_fn = |len: u64| {
+            format!("For length {}:", len)
+        };
+        
+        perform_measurements(
+            write,
+            crate::pricers::current_sha256_pricer(),
+            crate::pricers::proposed_sha256_pricer(),
+            data_fn,
+            transformer_fn,
+            base_path,
+            ann_fn
+        );
+    }
+
+    fn do_bnadd(write: bool) {
+        let base_path = "./vectors/bnadd";
+
+        let data_fn = || {
+            generate_bn_add_vectors(10, 10000)
+        };
+
+        let transformer_fn = |a: ([u8; 128], [u8; 64])| {
+            let (a, b) = a;
+
+            (a.to_vec(), b.to_vec())
+        };
+
+        let ann_fn = |_: u64| {
+            String::from("")
+        };
+        
+        perform_measurements(
+            write,
+            crate::pricers::current_bnadd_pricer(),
+            crate::pricers::proposed_bnadd_pricer(),
+            data_fn,
+            transformer_fn,
+            base_path,
+            ann_fn
+        );
     }
 
     #[test]
-    fn generate_for_sha256_proposed_pricing() {
-        let base_path = "./vectors/sha256/proposed";
-        let data = generate_sha256_vectors(10, 10000);
-        for (ins_and_outs, _, _) in data.into_iter() {
-            let input_len = ins_and_outs[0].0.len();
-            let pricer = crate::pricers::proposed_sha256_pricer();
-            let gas = pricer.price(input_len as u64);
-            let file = std::fs::File::create(&format!("{}/input_len_{}_gas_{}", base_path, input_len, gas)).unwrap();
-            let mut writer = csv::Writer::from_writer(file);
-            for (input, output) in ins_and_outs.into_iter() {
-                writer.write_record(&[
-                    hex::encode(&input),
-                    hex::encode(&output)
-                ]).unwrap();
-            }
-        }
+    fn generate_sha256() {
+        do_sha256(true);
     }
 
+    #[test]
+    fn try_sha256() {
+        do_sha256(false);
+    }
 
     #[test]
-    fn try_for_sha256() {
-        let data = generate_sha256_vectors(10, 10000);
-        for (ins_and_outs, _, gas) in data.into_iter() {
-            let input_len = ins_and_outs[0].0.len();
-            let pricer = crate::pricers::current_sha256_pricer();
-            let gas_before_2666 = pricer.price(input_len as u64);
-            let pricer = crate::pricers::proposed_sha256_pricer();
-            let gas_after_2666 = pricer.price(input_len as u64);
-            println!("For length {}:", input_len);
-            println!("Fits into pre-2666 schedule: {}, runtime: {}, schedule: {}", gas <= gas_before_2666, gas, gas_before_2666);
-            println!("Fits into post-2666 schedule: {}, runtime: {}, schedule: {}", gas <= gas_after_2666, gas, gas_after_2666);
-        }
+    fn generate_bnadd() {
+        do_bnadd(true);
+    }
+
+    #[test]
+    fn try_bnadd() {
+        do_bnadd(false);
     }
 }

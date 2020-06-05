@@ -21,3 +21,4 @@ ethereum-types = "0.9"
 keccak-hash = "0.5"
 eip-152 = {path = "./EIP-152"}
 csv = "*"
+colored = "*"

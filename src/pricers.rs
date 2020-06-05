@@ -70,3 +70,19 @@ pub fn proposed_sha256_pricer() -> Pricer {
 
     Pricer::Linear(l)
 }
+
+pub fn current_bnadd_pricer() -> Pricer {
+    let l = ConstantPricer {
+        constant: 150
+    };
+
+    Pricer::Constant(l)
+}
+
+pub fn proposed_bnadd_pricer() -> Pricer {
+    let l = ConstantPricer {
+        constant: 350
+    };
+
+    Pricer::Constant(l)
+}
