@@ -102,7 +102,7 @@ pub fn perform_measurements<
         let proposed_gas = proposed_pricer.price(scalar_param);
         if should_write {
             for (p, g) in vec!["current", "proposed"].into_iter().zip(vec![current_gas, proposed_gas].into_iter()) {
-                let file = std::fs::File::create(&format!("{}/{}/input_param_scalar_{}_gas_{}", base_path, p, scalar_param, g)).unwrap();
+                let file = std::fs::File::create(&format!("{}/{}/input_param_scalar_{}_gas_{}.csv", base_path, p, scalar_param, g)).unwrap();
                 let mut writer = csv::Writer::from_writer(file);
                 for (input, output) in data_as_vector.clone().into_iter() {
                     writer.write_record(&[
