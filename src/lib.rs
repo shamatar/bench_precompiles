@@ -1,5 +1,14 @@
+pub mod input_generators;
+pub mod pricers;
+pub mod runners;
+pub mod helpers;
+pub mod measurements;
+pub mod generator;
+
 #[cfg(test)]
 mod test {
+    use super::helpers::*;
+
     use std::thread;
 
     use std::sync::mpsc::{channel, TryRecvError};
@@ -246,7 +255,7 @@ mod test {
     fn benchmark_sha256_precompile() {
         let mut rng = XorShiftRng::from_seed([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
 
-        const RUNS_PER_WORK_UNIT: usize = 10000;
+        const RUNS_PER_WORK_UNIT: usize = 100000;
 
         use parity_crypto::digest;
 
@@ -260,8 +269,9 @@ mod test {
         let (tx, rx) = channel();
 
         let step = 8;
+        let limit = 256;
 
-        for i in 0..=(1024/step) {
+        for i in 0..=(limit/step) {
             let _: u8 = rng.gen();
             parameters_space.push((i*step, rng.clone(), pb.clone(), tx.clone()));
         }
@@ -332,7 +342,7 @@ mod test {
     fn benchmark_ripemd160_precompile() {
         let mut rng = XorShiftRng::from_seed([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
 
-        const RUNS_PER_WORK_UNIT: usize = 10000;
+        const RUNS_PER_WORK_UNIT: usize = 100000;
 
         use parity_crypto::digest;
 
@@ -346,8 +356,9 @@ mod test {
         let (tx, rx) = channel();
 
         let step = 8;
+        let limit = 256;
 
-        for i in 0..=(1024/step) {
+        for i in 0..=(limit/step) {
             let _: u8 = rng.gen();
             parameters_space.push((i*step, rng.clone(), pb.clone(), tx.clone()));
         }
@@ -545,34 +556,6 @@ mod test {
             let gas_average = GAS_PER_SECOND * ns_average / 1_000_000_000u128;
             println!("Hashed {} rounds for {} gas", k, gas_average);
         }
-    }
-
-    fn read_fr(reader: &[u8]) -> Result<bn::Fr, &'static str> {
-        let mut buf = [0u8; 32];
-        buf.copy_from_slice(&reader);
-
-        bn::Fr::from_slice(&buf[0..32]).map_err(|_| "Invalid field element")
-    }
-    
-    fn read_point(reader: &[u8]) -> Result<bn::G1, &'static str> {
-        use bn::{Fq, AffineG1, G1, Group};
-    
-        let mut buf = [0u8; 32];
-
-        buf.copy_from_slice(&reader[0..32]);
-    
-        let px = Fq::from_slice(&buf[0..32]).map_err(|_| "Invalid point x coordinate")?;
-
-        buf.copy_from_slice(&reader[32..64]);
-
-        let py = Fq::from_slice(&buf[0..32]).map_err(|_| "Invalid point y coordinate")?;
-        Ok(
-            if px == Fq::zero() && py == Fq::zero() {
-                G1::zero()
-            } else {
-                AffineG1::new(px, py).map_err(|_| "Invalid curve point")?.into()
-            }
-        )
     }
 
     #[test]
@@ -977,7 +960,7 @@ mod test {
     fn benchmark_keccak_sponge_price() {
         let mut rng = XorShiftRng::from_seed([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
 
-        const RUNS_PER_WORK_UNIT: usize = 100000;
+        const RUNS_PER_WORK_UNIT: usize = 10000;
 
         use keccak_hash;
 
@@ -990,9 +973,10 @@ mod test {
         let mut parameters_space = vec![];
         let (tx, rx) = channel();
 
-        let multiple = 8;
+        let limit = 512;
+        let multiple = 4;
 
-        for i in 0..=(1024/multiple) {
+        for i in 0..=(limit/multiple) {
             let _: u8 = rng.gen();
             parameters_space.push((i*multiple, rng.clone(), pb.clone(), tx.clone()));
         }
@@ -1057,4 +1041,86 @@ mod test {
             println!("Hashed {} bytes for {} gas", k, gas_average);
         }
     }
+
+
+    // #[test]
+    // #[ignore]
+    // fn benchmark_go_sha256_precompile() {
+    //     let mut rng = XorShiftRng::from_seed([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+
+    //     const RUNS_PER_WORK_UNIT: usize = 10000;
+
+    //     let pb = ProgressBar::new(1u64);
+
+    //     pb.set_style(ProgressStyle::default_bar()
+    //         .template("[{elapsed_precise}|{eta_precise}] {bar:50} {pos:>7}/{len:7} {msg}")
+    //         .progress_chars("##-"));
+
+    //     let mut parameters_space = vec![];
+    //     let (tx, rx) = channel();
+
+    //     let step = 8;
+
+    //     for i in 0..=(1024/step) {
+    //         let _: u8 = rng.gen();
+    //         parameters_space.push((i*step, rng.clone(), pb.clone(), tx.clone()));
+    //     }
+
+    //     drop(tx);
+
+    //     pb.set_length((parameters_space.len() * RUNS_PER_WORK_UNIT) as u64);
+
+    //     let handler = thread::spawn(move || {
+    //         parameters_space.into_par_iter().for_each(|(i, mut rng, pb, tx)| {
+    //             let mut input = vec![0u8; i];
+    //             for _ in 0..RUNS_PER_WORK_UNIT {
+
+    //                 rng.fill_bytes(&mut input);
+
+    //                 let start = std::time::Instant::now();
+                   
+    //                 let _ = go_precompiles_bindings::perform_operation(2, &input);
+
+    //                 let elapsed_nanos = start.elapsed().as_nanos();
+    //                 tx.send((elapsed_nanos, i)).unwrap();
+
+    //                 pb.inc(1);
+    //             }
+    //         });
+    //     });
+
+    //     let mut sums = std::collections::HashMap::new();
+
+    //     loop {
+    //         let subres = rx.try_recv();
+    //         match subres {
+    //             Ok((r, i)) => {
+    //                 let entry = sums.entry(i).or_insert(0u128);
+    //                 *entry += r as u128;
+    //             },
+    //             Err(TryRecvError::Empty) => {
+    //                 std::thread::sleep(std::time::Duration::from_millis(1000u64));
+    //             },
+    //             Err(TryRecvError::Disconnected) => {
+    //                 handler.join().unwrap();
+    //                 break;
+    //             }
+    //         }
+    //     }
+
+    //     pb.finish();
+
+    //     const GAS_PER_SECOND: u128 = 35_000_000;
+
+    //     println!("Using {} gas/second", GAS_PER_SECOND);
+
+    //     let mut as_vec: Vec<_> = sums.into_iter().collect();
+    //     as_vec.sort_by(|a, b| a.0.cmp(&b.0));
+
+    //     for (k, v) in as_vec.into_iter() {
+    //         let ns_average = (v as u128) / (RUNS_PER_WORK_UNIT as u128);
+    //         let gas_average = GAS_PER_SECOND * ns_average / 1_000_000_000u128;
+    //         println!("Hashed {} bytes for {} gas", k, gas_average);
+    //     }
+    // }
 }
