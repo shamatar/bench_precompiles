@@ -6,6 +6,7 @@ pub struct LinearPricer{
     pub constant: u64,
     pub scalar_shift: u64,
     pub scalar_chunk_size: u64,
+    pub add_one_chunk: bool,
     pub per_chunk: u64
 }
 
@@ -34,7 +35,10 @@ impl Pricer {
                 inner.constant
             },
             Pricer::Linear(inner) => {
-                let chunks = floor_div(scalar + inner.scalar_shift, inner.scalar_chunk_size);
+                let mut chunks = floor_div(scalar + inner.scalar_shift, inner.scalar_chunk_size);
+                if inner.add_one_chunk {
+                    chunks += 1;
+                }
 
                 inner.constant + chunks*inner.per_chunk
             }
@@ -46,6 +50,7 @@ pub fn current_sha256_pricer() -> Pricer {
     let l = LinearPricer {
         constant: 60,
         scalar_shift: 0,
+        add_one_chunk: true,
         scalar_chunk_size: 32,
         per_chunk: 12
     };
@@ -57,6 +62,7 @@ pub fn proposed_sha256_pricer() -> Pricer {
     let l = LinearPricer {
         constant: 5,
         scalar_shift: 8,
+        add_one_chunk: true,
         scalar_chunk_size: 64,
         per_chunk: 9
     };

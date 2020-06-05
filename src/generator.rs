@@ -64,7 +64,6 @@ mod test {
         }
     }
 
-
     #[test]
     fn generate_for_sha256_proposed_pricing() {
         let base_path = "./vectors/sha256/proposed";
@@ -81,6 +80,22 @@ mod test {
                     hex::encode(&output)
                 ]).unwrap();
             }
+        }
+    }
+
+
+    #[test]
+    fn try_for_sha256() {
+        let data = generate_sha256_vectors(10, 10000);
+        for (ins_and_outs, _, gas) in data.into_iter() {
+            let input_len = ins_and_outs[0].0.len();
+            let pricer = crate::pricers::current_sha256_pricer();
+            let gas_before_2666 = pricer.price(input_len as u64);
+            let pricer = crate::pricers::proposed_sha256_pricer();
+            let gas_after_2666 = pricer.price(input_len as u64);
+            println!("For length {}:", input_len);
+            println!("Fits into pre-2666 schedule: {}, runtime: {}, schedule: {}", gas <= gas_before_2666, gas, gas_before_2666);
+            println!("Fits into post-2666 schedule: {}, runtime: {}, schedule: {}", gas <= gas_after_2666, gas, gas_after_2666);
         }
     }
 }
