@@ -71,6 +71,31 @@ pub fn proposed_sha256_pricer() -> Pricer {
     Pricer::Linear(l)
 }
 
+
+pub fn current_ripemd_pricer() -> Pricer {
+    let l = LinearPricer {
+        constant: 600,
+        scalar_shift: 0,
+        scalar_chunk_size: 32,
+        per_chunk: 120,
+        use_ceil_div: true,
+    };
+
+    Pricer::Linear(l)
+}
+
+pub fn proposed_ripemd_pricer() -> Pricer {
+    let l = LinearPricer {
+        constant: 18,
+        scalar_shift: 8,
+        scalar_chunk_size: 64,
+        per_chunk: 12,
+        use_ceil_div: false
+    };
+
+    Pricer::Linear(l)
+}
+
 pub fn current_bnadd_pricer() -> Pricer {
     let l = ConstantPricer {
         constant: 150
@@ -85,4 +110,44 @@ pub fn proposed_bnadd_pricer() -> Pricer {
     };
 
     Pricer::Constant(l)
+}
+
+pub fn current_bnmul_pricer() -> Pricer {
+    let l = ConstantPricer {
+        constant: 6000
+    };
+
+    Pricer::Constant(l)
+}
+
+pub fn proposed_bnmul_pricer() -> Pricer {
+    let l = ConstantPricer {
+        constant: 6300
+    };
+
+    Pricer::Constant(l)
+}
+
+pub fn bnpair_pricer() -> Pricer {
+    let l = LinearPricer {
+        constant: 45000,
+        scalar_shift: 0,
+        scalar_chunk_size: 1,
+        per_chunk: 34000,
+        use_ceil_div: false
+    };
+
+    Pricer::Linear(l)
+}
+
+pub fn blake2f_pricer() -> Pricer {
+    let l = LinearPricer {
+        constant: 0,
+        scalar_shift: 0,
+        scalar_chunk_size: 1,
+        per_chunk: 1,
+        use_ceil_div: false
+    };
+
+    Pricer::Linear(l)
 }
