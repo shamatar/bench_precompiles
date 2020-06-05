@@ -5,7 +5,7 @@ pub const MGAS_PER_SECOND: u128 = 30_000_000;
 use rand::{SeedableRng};
 use rand_xorshift::XorShiftRng;
 
-pub fn generate_sha256_vectors(num_different_vectors: usize, num_tries_per_vector: usize) -> Vec<( Vec<(Vec<u8>, [u8; 32])>, u64)> {    
+pub fn generate_sha256_vectors(num_different_vectors: usize, num_tries_per_vector: usize) -> Vec<( Vec<(Vec<u8>, [u8; 32])>, u128, u64)> {    
     let limit = 256;
     let step = 8;
 
@@ -30,11 +30,12 @@ pub fn generate_sha256_vectors(num_different_vectors: usize, num_tries_per_vecto
             inputs_and_outputs.push((input, output));
         }
 
-        let gas = total * MGAS_PER_SECOND / 1_000_000_000 / (num_different_vectors as u128) / (num_tries_per_vector as u128);
+        let average_ns = total / (num_different_vectors as u128) / (num_tries_per_vector as u128);
+        let gas = average_ns * MGAS_PER_SECOND / 1_000_000_000;
 
         let gas = gas as u64;
 
-        data_points.push((inputs_and_outputs, gas));
+        data_points.push((inputs_and_outputs, average_ns, gas));
     }
 
     data_points
@@ -48,7 +49,7 @@ mod test {
     fn generate_for_sha256_current_pricing() {
         let base_path = "./vectors/sha256/current";
         let data = generate_sha256_vectors(10, 10000);
-        for (ins_and_outs, _) in data.into_iter() {
+        for (ins_and_outs, _, _) in data.into_iter() {
             let input_len = ins_and_outs[0].0.len();
             let pricer = crate::pricers::current_sha256_pricer();
             let gas = pricer.price(input_len as u64);
@@ -68,7 +69,7 @@ mod test {
     fn generate_for_sha256_proposed_pricing() {
         let base_path = "./vectors/sha256/proposed";
         let data = generate_sha256_vectors(10, 10000);
-        for (ins_and_outs, _) in data.into_iter() {
+        for (ins_and_outs, _, _) in data.into_iter() {
             let input_len = ins_and_outs[0].0.len();
             let pricer = crate::pricers::proposed_sha256_pricer();
             let gas = pricer.price(input_len as u64);
