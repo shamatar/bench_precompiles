@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 pub struct GethJsonFormat {
     #[serde(rename = "Input")]
     input: String,
-    #[serde(rename = "Output")]
+    #[serde(rename = "Expected")]
     output: String,
     #[serde(rename = "Name")]
     name: String

@@ -255,17 +255,20 @@ pub fn perform_measurements<
     proposed_pricer: crate::pricers::Pricer,
     runner: F,
     transformer: C,
-    writers: Vec<Box<dyn Fn(u64, Vec<(Vec<u8>, Vec<u8>)>, u64, u64) + 'static>>,
+    writers: Vec<Box<dyn BenchmarkDataWriter>>,
     ann: A
 ) {
     let data = runner();
+    let mut writers = writers;
     for (scalar_param, ins_and_outs, _, gas) in data.into_iter() {
         let data_as_vector: Vec<_> = ins_and_outs.into_iter().map(|el| transformer(el)).collect();
         let current_gas = current_pricer.price(scalar_param);
         let proposed_gas = proposed_pricer.price(scalar_param);
         if should_write {
-            for writer in writers.iter() {
-                writer(scalar_param, data_as_vector.clone(), current_gas, proposed_gas);
+            for writer in writers.iter_mut() {
+                for v in data_as_vector.clone().into_iter() {
+                    writer.add_per_scalar_input(scalar_param, v, current_gas, proposed_gas);
+                }
             }
         }
         let annotation = ann(scalar_param);
@@ -273,61 +276,161 @@ pub fn perform_measurements<
         println!("{}", annotation);
         print_gases(gas, current_gas, proposed_gas);
     }
+
+    if should_write {
+        for writer in writers.into_iter() {
+            writer.flush();
+        }
+    }
 }
 
-pub fn make_csv_writer_for_path(base_path: &str) -> Box<dyn Fn(u64, Vec<(Vec<u8>, Vec<u8>)>, u64, u64) + 'static> {
-    let p = base_path.to_string();
-    let cl = move |a: u64, b: Vec<(Vec<u8>, Vec<u8>)>, c: u64, d: u64| {
-        write_as_csv(a, b, c, d, &p)
-    };
-
-    box_writer(cl)
+pub trait BenchmarkDataWriter: 'static {
+    fn add_per_scalar_input(&mut self, scalar: u64, ins_and_outs: (Vec<u8>, Vec<u8>), current_gas: u64, proposed_gas: u64);
+    fn flush(&self);
+}
+pub struct CSVWriter {
+    base_path: String,
+    accumulated_data_points: std::collections::HashMap<(u64, u64, u64), Vec<(Vec<u8>, Vec<u8>)>>
 }
 
-pub fn make_json_writer_for_path_and_test_name(base_path: &str, test_name: &str) -> Box<dyn Fn(u64, Vec<(Vec<u8>, Vec<u8>)>, u64, u64) + 'static> {
-    let p = base_path.to_string();
-    let n = test_name.to_string();
-    let cl = move |a: u64, b: Vec<(Vec<u8>, Vec<u8>)>, c: u64, d: u64| {
-        write_as_json(a, b, c, d, &p, &n)
-    };
-
-    box_writer(cl)
+impl CSVWriter {
+    pub fn new_for_path(base_path: &str) -> Self {
+        Self {
+            base_path: base_path.to_string(),
+            accumulated_data_points: std::collections::HashMap::new()
+        }
+    }
 }
 
-fn write_as_csv(scalar_param: u64, data: Vec<(Vec<u8>, Vec<u8>)>, current_gas: u64, proposed_gas: u64, base_path: &str) {
-    for (p, g) in vec!["current", "proposed"].into_iter().zip(vec![current_gas, proposed_gas].into_iter()) {
-        let file = std::fs::File::create(&format!("{}/{}/input_param_scalar_{}_gas_{}.csv", base_path, p, scalar_param, g)).unwrap();
-        let mut writer = csv::Writer::from_writer(file);
-        let mut dedup_set = std::collections::HashSet::new();
-        for (input, output) in data.clone().into_iter() {
-            if !dedup_set.contains(&input) {
-                dedup_set.insert(input.clone());
-                writer.write_record(&[
-                    hex::encode(&input),
-                    hex::encode(&output)
-                ]).unwrap();
+impl BenchmarkDataWriter for CSVWriter {
+    fn add_per_scalar_input(&mut self, scalar: u64, ins_and_outs: (Vec<u8>, Vec<u8>), current_gas: u64, proposed_gas: u64) {
+        let key = (scalar, current_gas, proposed_gas);
+        let entry = self.accumulated_data_points.entry(key).or_insert(vec![]);
+        entry.push(ins_and_outs);
+    }
+
+    fn flush(&self) {
+        let mut keys: Vec<_> = self.accumulated_data_points.keys().collect();
+        keys.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+        });
+        for key in keys.into_iter() {
+            let data = self.accumulated_data_points.get(&key).unwrap().clone();
+            let (scalar, current_gas, proposed_gas) = key;
+            for (p, g) in vec!["current", "proposed"].into_iter().zip(vec![current_gas, proposed_gas].into_iter()) {
+                let file = std::fs::File::create(&format!("{}/{}/input_param_scalar_{}_gas_{}.csv", &self.base_path, p, scalar, g)).unwrap();
+                let mut writer = csv::Writer::from_writer(file);
+                let mut dedup_set = std::collections::HashSet::new();
+                for (input, output) in data.clone().into_iter() {
+                    if !dedup_set.contains(&input) {
+                        dedup_set.insert(input.clone());
+                        writer.write_record(&[
+                            hex::encode(&input),
+                            hex::encode(&output)
+                        ]).unwrap();
+                    }
+                }
             }
         }
     }
 }
 
-fn write_as_json(scalar_param: u64, data: Vec<(Vec<u8>, Vec<u8>)>, _current_gas: u64, _proposed_gas: u64, base_path: &str, test_name: &str) {
-    let file = std::fs::File::create(&format!("{}/common_{}.json", base_path, test_name)).unwrap();
-    let mut dedup_set = std::collections::HashSet::new();
-    let mut i = 0;
-    let mut test_vectors = vec![];
-    for (input, output) in data.clone().into_iter() {
-        if !dedup_set.contains(&input) {
-            dedup_set.insert(input.clone());
-            let testname = format!("{}_{}_{}", test_name, scalar_param, i);
-            let record = serialization::GethJsonFormat::new_from_data_and_name(&input, &output, testname);
-            test_vectors.push(record);
-            i += 1;
+pub struct JSONWriter {
+    base_path: String,
+    test_name: String,
+    accumulated_data_points: std::collections::HashMap<(u64, u64, u64), Vec<(Vec<u8>, Vec<u8>)>>
+}
+
+impl JSONWriter {
+    pub fn new_for_path_and_name(base_path: &str, test_name: &str) -> Self {
+        Self {
+            base_path: base_path.to_string(),
+            test_name: test_name.to_string(),
+            accumulated_data_points: std::collections::HashMap::new()
         }
     }
-
-    to_writer(file, &test_vectors).unwrap();
 }
+
+impl BenchmarkDataWriter for JSONWriter {
+    fn add_per_scalar_input(&mut self, scalar: u64, ins_and_outs: (Vec<u8>, Vec<u8>), current_gas: u64, proposed_gas: u64) {
+        let key = (scalar, current_gas, proposed_gas);
+        let entry = self.accumulated_data_points.entry(key).or_insert(vec![]);
+        entry.push(ins_and_outs);
+    }
+
+    fn flush(&self) {
+        let file = std::fs::File::create(&format!("{}/common_{}.json", self.base_path, self.test_name)).unwrap();
+        let mut test_vectors = vec![];
+        let mut keys: Vec<_> = self.accumulated_data_points.keys().collect();
+        keys.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+        });
+        for key in keys.into_iter() {
+            let data = self.accumulated_data_points.get(&key).unwrap().clone();
+            let (scalar, _current_gas, _proposed_gas) = key;
+            let mut dedup_set = std::collections::HashSet::new();
+            let mut i = 0;
+            for (input, output) in data.clone().into_iter() {
+                if !dedup_set.contains(&input) {
+                    dedup_set.insert(input.clone());
+                    let testname = format!("{}_{}_{}", self.test_name, scalar, i);
+                    let record = serialization::GethJsonFormat::new_from_data_and_name(&input, &output, testname);
+                    test_vectors.push(record);
+                    i += 1;
+                }
+            }
+        }
+        
+        to_writer(file, &test_vectors).unwrap();
+    }
+}
+
+pub fn make_csv_writer_for_path(base_path: &str) -> Box<dyn BenchmarkDataWriter> {
+    let writer = CSVWriter::new_for_path(base_path);
+
+    box_writer(writer)
+}
+
+pub fn make_json_writer_for_path_and_test_name(base_path: &str, test_name: &str) -> Box<dyn BenchmarkDataWriter> {
+    let writer = JSONWriter::new_for_path_and_name(base_path, test_name);
+
+    box_writer(writer)
+}
+
+// fn write_as_csv(scalar_param: u64, data: Vec<(Vec<u8>, Vec<u8>)>, current_gas: u64, proposed_gas: u64, base_path: &str) {
+//     for (p, g) in vec!["current", "proposed"].into_iter().zip(vec![current_gas, proposed_gas].into_iter()) {
+//         let file = std::fs::File::create(&format!("{}/{}/input_param_scalar_{}_gas_{}.csv", base_path, p, scalar_param, g)).unwrap();
+//         let mut writer = csv::Writer::from_writer(file);
+//         let mut dedup_set = std::collections::HashSet::new();
+//         for (input, output) in data.clone().into_iter() {
+//             if !dedup_set.contains(&input) {
+//                 dedup_set.insert(input.clone());
+//                 writer.write_record(&[
+//                     hex::encode(&input),
+//                     hex::encode(&output)
+//                 ]).unwrap();
+//             }
+//         }
+//     }
+// }
+
+// fn write_as_json(scalar_param: u64, data: Vec<(Vec<u8>, Vec<u8>)>, _current_gas: u64, _proposed_gas: u64, base_path: &str, test_name: &str) {
+//     let file = std::fs::File::create(&format!("{}/common_{}.json", base_path, test_name)).unwrap();
+//     let mut dedup_set = std::collections::HashSet::new();
+//     let mut i = 0;
+//     let mut test_vectors = vec![];
+//     for (input, output) in data.clone().into_iter() {
+//         if !dedup_set.contains(&input) {
+//             dedup_set.insert(input.clone());
+//             let testname = format!("{}_{}_{}", test_name, scalar_param, i);
+//             let record = serialization::GethJsonFormat::new_from_data_and_name(&input, &output, testname);
+//             test_vectors.push(record);
+//             i += 1;
+//         }
+//     }
+
+//     to_writer(file, &test_vectors).unwrap();
+// }
 
 fn make_colored_bool(input: bool) -> colored::ColoredString {
     use colored::*;
@@ -364,8 +467,8 @@ fn make_pb() -> ProgressBar {
     pb
 }
 
-pub fn box_writer(writer: impl Fn(u64, Vec<(Vec<u8>, Vec<u8>)>, u64, u64) + 'static) -> Box<dyn Fn(u64, Vec<(Vec<u8>, Vec<u8>)>, u64, u64) + 'static> {
-    Box::from(writer) as Box<dyn Fn(u64, Vec<(Vec<u8>, Vec<u8>)>, u64, u64) + 'static>
+pub fn box_writer(writer: impl BenchmarkDataWriter) -> Box<dyn BenchmarkDataWriter> {
+    Box::from(writer) as Box<dyn BenchmarkDataWriter>
 }
 
 #[cfg(test)]
