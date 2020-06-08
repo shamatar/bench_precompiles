@@ -22,3 +22,5 @@ keccak-hash = "0.5"
 eip-152 = {path = "./EIP-152"}
 csv = "*"
 colored = "*"
+serde = {version = "*", features = ["derive"]}
+serde_json = "*"

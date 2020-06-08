@@ -1,10 +1,11 @@
-use super::{runners, input_generators, measurements};
+use super::{runners, input_generators, measurements, serialization};
 
 pub const MGAS_PER_SECOND: u128 = 30_000_000;
 
 use rand::{SeedableRng};
 use rand_xorshift::XorShiftRng;
 use indicatif::{ProgressBar, ProgressStyle};
+use serde_json::to_writer;
 
 pub fn generate_sha256_vectors(num_different_vectors: usize, num_tries_per_vector: usize) -> Vec<(u64, Vec<(Vec<u8>, [u8; 32])>, u128, u64)> {    
     let limit = 256;
@@ -254,7 +255,7 @@ pub fn perform_measurements<
     proposed_pricer: crate::pricers::Pricer,
     runner: F,
     transformer: C,
-    base_path: &str,
+    writers: Vec<Box<dyn Fn(u64, Vec<(Vec<u8>, Vec<u8>)>, u64, u64) + 'static>>,
     ann: A
 ) {
     let data = runner();
@@ -263,23 +264,69 @@ pub fn perform_measurements<
         let current_gas = current_pricer.price(scalar_param);
         let proposed_gas = proposed_pricer.price(scalar_param);
         if should_write {
-            for (p, g) in vec!["current", "proposed"].into_iter().zip(vec![current_gas, proposed_gas].into_iter()) {
-                let file = std::fs::File::create(&format!("{}/{}/input_param_scalar_{}_gas_{}.csv", base_path, p, scalar_param, g)).unwrap();
-                let mut writer = csv::Writer::from_writer(file);
-                for (input, output) in data_as_vector.clone().into_iter() {
-                    writer.write_record(&[
-                        hex::encode(&input),
-                        hex::encode(&output)
-                    ]).unwrap();
-                }
+            for writer in writers.iter() {
+                writer(scalar_param, data_as_vector.clone(), current_gas, proposed_gas);
             }
         }
-
         let annotation = ann(scalar_param);
 
         println!("{}", annotation);
         print_gases(gas, current_gas, proposed_gas);
     }
+}
+
+pub fn make_csv_writer_for_path(base_path: &str) -> Box<dyn Fn(u64, Vec<(Vec<u8>, Vec<u8>)>, u64, u64) + 'static> {
+    let p = base_path.to_string();
+    let cl = move |a: u64, b: Vec<(Vec<u8>, Vec<u8>)>, c: u64, d: u64| {
+        write_as_csv(a, b, c, d, &p)
+    };
+
+    box_writer(cl)
+}
+
+pub fn make_json_writer_for_path_and_test_name(base_path: &str, test_name: &str) -> Box<dyn Fn(u64, Vec<(Vec<u8>, Vec<u8>)>, u64, u64) + 'static> {
+    let p = base_path.to_string();
+    let n = test_name.to_string();
+    let cl = move |a: u64, b: Vec<(Vec<u8>, Vec<u8>)>, c: u64, d: u64| {
+        write_as_json(a, b, c, d, &p, &n)
+    };
+
+    box_writer(cl)
+}
+
+fn write_as_csv(scalar_param: u64, data: Vec<(Vec<u8>, Vec<u8>)>, current_gas: u64, proposed_gas: u64, base_path: &str) {
+    for (p, g) in vec!["current", "proposed"].into_iter().zip(vec![current_gas, proposed_gas].into_iter()) {
+        let file = std::fs::File::create(&format!("{}/{}/input_param_scalar_{}_gas_{}.csv", base_path, p, scalar_param, g)).unwrap();
+        let mut writer = csv::Writer::from_writer(file);
+        let mut dedup_set = std::collections::HashSet::new();
+        for (input, output) in data.clone().into_iter() {
+            if !dedup_set.contains(&input) {
+                dedup_set.insert(input.clone());
+                writer.write_record(&[
+                    hex::encode(&input),
+                    hex::encode(&output)
+                ]).unwrap();
+            }
+        }
+    }
+}
+
+fn write_as_json(scalar_param: u64, data: Vec<(Vec<u8>, Vec<u8>)>, _current_gas: u64, _proposed_gas: u64, base_path: &str, test_name: &str) {
+    let file = std::fs::File::create(&format!("{}/common_{}.json", base_path, test_name)).unwrap();
+    let mut dedup_set = std::collections::HashSet::new();
+    let mut i = 0;
+    let mut test_vectors = vec![];
+    for (input, output) in data.clone().into_iter() {
+        if !dedup_set.contains(&input) {
+            dedup_set.insert(input.clone());
+            let testname = format!("{}_{}_{}", test_name, scalar_param, i);
+            let record = serialization::GethJsonFormat::new_from_data_and_name(&input, &output, testname);
+            test_vectors.push(record);
+            i += 1;
+        }
+    }
+
+    to_writer(file, &test_vectors).unwrap();
 }
 
 fn make_colored_bool(input: bool) -> colored::ColoredString {
@@ -317,12 +364,17 @@ fn make_pb() -> ProgressBar {
     pb
 }
 
+pub fn box_writer(writer: impl Fn(u64, Vec<(Vec<u8>, Vec<u8>)>, u64, u64) + 'static) -> Box<dyn Fn(u64, Vec<(Vec<u8>, Vec<u8>)>, u64, u64) + 'static> {
+    Box::from(writer) as Box<dyn Fn(u64, Vec<(Vec<u8>, Vec<u8>)>, u64, u64) + 'static>
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
 
     fn do_sha256(write: bool) {
         let base_path = "./vectors/sha256";
+        let test_name = "sha256";
 
         let data_fn = || {
             generate_sha256_vectors(10, 10000)
@@ -338,19 +390,23 @@ mod test {
             format!("For length {}:", len)
         };
         
+        let csv_writer_fn = make_csv_writer_for_path(base_path);
+        let json_writer_fn = make_json_writer_for_path_and_test_name(base_path, test_name);
+
         perform_measurements(
             write,
             crate::pricers::current_sha256_pricer(),
             crate::pricers::proposed_sha256_pricer(),
             data_fn,
             transformer_fn,
-            base_path,
+            vec![csv_writer_fn, json_writer_fn],
             ann_fn
         );
     }
 
     fn do_ripemd(write: bool) {
         let base_path = "./vectors/ripemd";
+        let test_name = "ripemd";
 
         let data_fn = || {
             generate_ripemd_vectors(10, 10000)
@@ -359,26 +415,33 @@ mod test {
         let transformer_fn = |a: (Vec<u8>, [u8; 20])| {
             let (a, b) = a;
 
-            (a, b.to_vec())
+            let mut padded = vec![0u8; 12];
+            padded.extend_from_slice(&b[..]);
+
+            (a, padded)
         };
 
         let ann_fn = |len: u64| {
             format!("For length {}:", len)
         };
-        
+
+        let csv_writer_fn = make_csv_writer_for_path(base_path);
+        let json_writer_fn = make_json_writer_for_path_and_test_name(base_path, test_name);
+
         perform_measurements(
             write,
             crate::pricers::current_ripemd_pricer(),
             crate::pricers::proposed_ripemd_pricer(),
             data_fn,
             transformer_fn,
-            base_path,
+            vec![csv_writer_fn, json_writer_fn],
             ann_fn
         );
     }
 
     fn do_blake2f(write: bool) {
         let base_path = "./vectors/blake2f";
+        let test_name = "blake2f";
 
         let data_fn = || {
             generate_blake2f_vectors(10, 10000)
@@ -394,19 +457,23 @@ mod test {
             format!("For {} rounds:", rounds)
         };
         
+        let csv_writer_fn = make_csv_writer_for_path(base_path);
+        let json_writer_fn = make_json_writer_for_path_and_test_name(base_path, test_name);
+        
         perform_measurements(
             write,
             crate::pricers::blake2f_pricer(),
             crate::pricers::blake2f_pricer(),
             data_fn,
             transformer_fn,
-            base_path,
+            vec![csv_writer_fn, json_writer_fn],
             ann_fn
         );
     }
 
     fn do_bnadd(write: bool) {
         let base_path = "./vectors/bnadd";
+        let test_name = "bnadd";
 
         let data_fn = || {
             generate_bn_add_vectors(10, 10000)
@@ -421,6 +488,9 @@ mod test {
         let ann_fn = |_: u64| {
             String::from("")
         };
+
+        let csv_writer_fn = make_csv_writer_for_path(base_path);
+        let json_writer_fn = make_json_writer_for_path_and_test_name(base_path, test_name);
         
         perform_measurements(
             write,
@@ -428,13 +498,14 @@ mod test {
             crate::pricers::proposed_bnadd_pricer(),
             data_fn,
             transformer_fn,
-            base_path,
+            vec![csv_writer_fn, json_writer_fn],
             ann_fn
         );
     }
 
     fn do_bnmul(write: bool) {
         let base_path = "./vectors/bnmul";
+        let test_name = "bnmul";
 
         let data_fn = || {
             generate_bn_mul_vectors(10, 10000)
@@ -449,6 +520,9 @@ mod test {
         let ann_fn = |_: u64| {
             String::from("")
         };
+
+        let csv_writer_fn = make_csv_writer_for_path(base_path);
+        let json_writer_fn = make_json_writer_for_path_and_test_name(base_path, test_name);
         
         perform_measurements(
             write,
@@ -456,7 +530,7 @@ mod test {
             crate::pricers::proposed_bnmul_pricer(),
             data_fn,
             transformer_fn,
-            base_path,
+            vec![csv_writer_fn, json_writer_fn],
             ann_fn
         );
     }
@@ -464,6 +538,7 @@ mod test {
 
     fn do_bnpair(write: bool) {
         let base_path = "./vectors/bnpair";
+        let test_name = "bnpair";
 
         let data_fn = || {
             generate_bnpair_vectors(10, 1000)
@@ -478,6 +553,9 @@ mod test {
         let ann_fn = |num_pairs: u64| {
             format!("For {} pairs", num_pairs)
         };
+
+        let csv_writer_fn = make_csv_writer_for_path(base_path);
+        let json_writer_fn = make_json_writer_for_path_and_test_name(base_path, test_name);
         
         perform_measurements(
             write,
@@ -485,7 +563,7 @@ mod test {
             crate::pricers::bnpair_pricer(),
             data_fn,
             transformer_fn,
-            base_path,
+            vec![csv_writer_fn, json_writer_fn],
             ann_fn
         );
     }

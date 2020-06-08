@@ -4,6 +4,7 @@ pub mod runners;
 pub mod helpers;
 pub mod measurements;
 pub mod generator;
+pub mod serialization;
 
 #[cfg(test)]
 mod test {
